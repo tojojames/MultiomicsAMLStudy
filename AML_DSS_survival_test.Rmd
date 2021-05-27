@@ -1,0 +1,359 @@
+---
+title: "AML DSS survival Test"
+author:16/09/2020"
+output: html_document
+---
+
+###  Setting clean envt and memory
+```{r}
+rm(list=ls())
+gc()
+detach_package <- function(pkg, character.only = FALSE)
+{
+  if(!character.only)
+  {
+    pkg <- deparse(substitute(pkg))
+  }
+  search_item <- paste("package", pkg, sep = ":")
+  while(search_item %in% search())
+  {
+    detach(search_item, unload = TRUE, character.only = TRUE)
+  }
+}
+detach_package("plyr", TRUE)
+```
+
+#### Loading datasets
+```{r}
+library(MultiAssayExperiment)
+library(S4Vectors)
+library("survival")
+library("survminer")
+load("/home/tojo.james/AMLmultiomics/AML_MAexp_v03.RData")
+```
+
+### RNA normalization
+
+```{r}
+library(DESeq2)
+cts <- assay(MAexp@ExperimentList$RNAseq)
+coldata <- pData[(pData$patient_id %in% colnames(cts)),]
+coldata <- coldata[colnames(cts),]    
+coldata <- as.data.frame(coldata[c("patient_id","sex","ELN2017")])
+rownames(coldata) <- NULL
+
+dim(coldata)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ 1 + sex)
+
+#### Not corrected for sex (blind = TRUE)
+vsd <- varianceStabilizingTransformation(dds,blind = TRUE)
+```
+
+#### Selecteding only 1000 most variant genes across samples
+```{r}
+ntop <- 52606
+#ntop <- 50
+dim(assay(vsd))
+
+rv <- rowVars(assay(vsd))
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+## get the DESeqTransform object with the top 500 most variable genes
+vsd1K <- vsd[select,]
+RNAseq_vsd <- assay(vsd1K)
+RNAseq_vsd  <- RNAseq_vsd[which(rowMeans(!is.na(RNAseq_vsd)) > 0.99), ]
+dim(RNAseq_vsd)
+
+```
+
+#### Selecteding only 1000 most variant proteins across samples  
+```{r}
+ntop <-8632
+prot_data <- assay(MAexp@ExperimentList$Proteomics)
+#head(prot_data)
+dim(prot_data)
+prot_data <- prot_data[which(rowMeans(!is.na(prot_data)) > 0.99),]
+dim(prot_data)
+
+rv <- rowVars(prot_data)
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+## get the DESeqTransform object with the top 500 most variable genes
+prot_data1K <- prot_data[select,]
+prot_data1K <- prot_data1K[,(colnames(prot_data1K) %in% colnames(RNAseq_vsd))]
+prot_data1K <-prot_data1K[,c(colnames(RNAseq_vsd))]
+dim(prot_data1K)
+
+gene_protein_dictionary <- as.data.frame(rowData(MAexp@ExperimentList$Proteomics))
+
+protein_match_ensembl_id <- as.character(gene_protein_dictionary[gene_protein_dictionary$hgnc_symbol %in% rownames(prot_data1K),][['ensembl_gene_id']])
+```
+#### Diff Expression (Gene & proteomics) based on DSRT
+```{r}
+library(SNFtool)
+# c(55:57,60)(0.00886)## Chemoagents 55:60(0.019210) 50:60 50:100 50:70 
+DSS_all <- t(assay(MAexp@ExperimentList$DSRT))
+drug_list <- colnames(DSS_all)
+
+DSS_cox_df <- data.frame(matrix(NA, nrow = length(drug_list), ncol = 7))
+
+#DSS_selected[c(drug_list[i])]
+#length(drug_list)
+for(i in 1:length(drug_list)){
+  tryCatch({
+    print(i)
+    DSS_selected <- DSS_all[,c(drug_list[i])]
+    DSS_cox_df[i,1] <- as.character(drug_list[i])
+    DSS_samples <- names(DSS_selected)
+    #rownames(t(RNAseq_vsd))
+    RNAseq_vsd <- assay(vsd1K)
+    RNAseq_vsd  <- RNAseq_vsd[which(rowMeans(!is.na(RNAseq_vsd)) > 0.99), ]
+    RNA_selected <-t(RNAseq_vsd[,c(DSS_samples)])
+    #prot_data <- assay(MAexp@ExperimentList$Proteomics)
+    prot_data1K <- prot_data
+    prot_data1K <- prot_data1K[,(colnames(prot_data1K) %in% colnames(RNAseq_vsd))]
+    prot_data1K <-prot_data1K[,c(colnames(RNAseq_vsd))]
+    prot_selected <- t(prot_data1K[,c(DSS_samples)])
+    dim(DSS_selected)
+    
+    dim(RNA_selected)
+    cor_RNA_DSS <-cor(RNA_selected,DSS_selected,method = c("spearman"))
+    cor_RNA_DSS <- as.data.frame(cor_RNA_DSS)
+    
+    cor_RNA_DSS <-cor_RNA_DSS[colSums(!is.na(cor_RNA_DSS)) > 0]
+    cor_RNA_DSS_abs <- abs(cor_RNA_DSS)
+    #gene_dssminvalue <- apply(cor_RNA_DSS,1,min)
+    #gene_dssmaxvalue <- apply(cor_RNA_DSS,1,max)
+    
+    gene_abs_dssmaxvalue <- apply(cor_RNA_DSS_abs,1,max)
+    
+    gene_abs_dssmaxvalue <- sort(gene_abs_dssmaxvalue,decreasing = TRUE)
+    #hist(gene_abs_dssmaxvalue)
+    selected_DSRT_genes <- names(gene_abs_dssmaxvalue[gene_abs_dssmaxvalue >0.5])
+    #print(length(selected_DSRT_genes))
+    
+    #dim(prot_selected);
+    prot_selected <- t(prot_data1K[,c(DSS_samples)])
+    cor_prot_DSS <-cor(prot_selected,DSS_selected,method = c("spearman"))
+    cor_prot_DSS <- as.data.frame(cor_prot_DSS)
+    
+    cor_prot_DSS <-cor_prot_DSS[colSums(!is.na(cor_prot_DSS)) > 0]
+    cor_prot_DSS_abs <- abs(cor_prot_DSS)
+    #prot_dssminvalue <- apply(cor_prot_DSS,1,min)
+    #prot_dssmaxvalue <- apply(cor_prot_DSS,1,max)
+    
+    protein_abs_dssmaxvalue <- apply(cor_prot_DSS_abs,1,max)
+    
+    protein_abs_dssmaxvalue <- sort(protein_abs_dssmaxvalue,decreasing = TRUE)
+    #hist(protein_abs_dssmaxvalue)
+    selected_DSRT_protein <- names(protein_abs_dssmaxvalue[protein_abs_dssmaxvalue>0.5])
+    #print(length(selected_DSRT_protein))
+    
+    RNAseq_vsd  <- subset(RNAseq_vsd, rownames(RNAseq_vsd) %in% selected_DSRT_genes)
+    prot_data1K  <- subset(prot_data1K, rownames(prot_data1K) %in% selected_DSRT_protein)
+    RNAseq_vsd_normalized <- t(RNAseq_vsd)
+    prot_data1K_normalized <- t(prot_data1K)
+    dist_RNAseq <- as.matrix(dist(RNAseq_vsd_normalized))
+    dist_Proteomics <- as.matrix(dist(prot_data1K_normalized))
+    W1 <- affinityMatrix(dist_RNAseq, K = 12, sigma = 0.5)
+    W2 <- affinityMatrix(dist_Proteomics, K = 12, sigma = 0.5)
+    W = SNF(list(W1,W2), 12, 12)
+    #print(W)
+    clusters <- spectralClustering(W, K = 2)
+    snf_sc <- data.frame(patient_id = as.character(colnames(W)),snf_cluster = spectralClustering(W, K = 2))
+    pdata_snfcluster <- merge(pData,snf_sc,by = c("patient_id"))
+    res.cox <- NULL
+    res.cox <- coxph(Surv(pdata_snfcluster$time_days, pdata_snfcluster$status) ~ pdata_snfcluster$snf_cluster + pdata_snfcluster$sex + pdata_snfcluster$age + pdata_snfcluster$ELN2017, data =  pdata_snfcluster)
+    #summary(res.cox)
+    coef_coxph <- summary(res.cox)$coefficients[1, 1]
+    exp.coef_coxph <-summary(res.cox)$coefficients[1, 2]
+    se_coef_coxph <- summary(res.cox)$coefficients[1, 3]
+    pvalue_coef_coxph <- summary(res.cox)$coefficients[1, 5]
+    DSS_cox_df[i,2] <- length(selected_DSRT_genes)
+    DSS_cox_df[i,3]<- length(selected_DSRT_protein)
+    DSS_cox_df[i,4] <- coef_coxph 
+    DSS_cox_df[i,5] <- exp.coef_coxph
+    DSS_cox_df[i,6] <- se_coef_coxph
+    DSS_cox_df[i,7] <- pvalue_coef_coxph
+    print(pvalue_coef_coxph)
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+DSS_cox_df <- as.data.frame(DSS_cox_df)
+colnames(DSS_cox_df) <- c("Drug_ID","diff.gene.count","diff.protein.count","coef_coxph","exp.coef_coxph","se_coef_coxph","pvalue_coef_coxph")
+write.csv(DSS_cox_df, file = "DSS_cox_528drugs.csv")
+eigengap
+```
+
+
+```{r}
+DSS_cox_df <- DSS_cox_df[complete.cases(DSS_cox_df), ]
+selected_DSS_cox_df <-DSS_cox_df[DSS_cox_df$pvalue_coef_coxph<0.05,]
+```
+
+##### On selected drugs
+```{r}
+library(SNFtool)
+# c(55:57,60)(0.00886)## Chemoagents 55:60(0.019210) 50:60 50:100 50:70 
+
+
+
+
+drug_list <- selected_DSS_cox_df$Drug_ID
+DSS_cox_df <- data.frame(matrix(NA, nrow = length(drug_list), ncol = 9))
+#DSS_selected[c(drug_list[i])]
+#length(drug_list)
+for(i in 1:length(drug_list)){
+  tryCatch({
+    print(i)
+    DSS_selected <- DSS_all[,c(drug_list[i])]
+    DSS_cox_df[i,1] <- as.character(drug_list[i])
+    DSS_samples <- names(DSS_selected)
+    #rownames(t(RNAseq_vsd))
+    RNAseq_vsd <- assay(vsd1K)
+    RNAseq_vsd  <- RNAseq_vsd[which(rowMeans(!is.na(RNAseq_vsd)) > 0.99), ]
+    RNA_selected <-t(RNAseq_vsd[,c(DSS_samples)])
+    #prot_data <- assay(MAexp@ExperimentList$Proteomics)
+    prot_data1K <- prot_data
+    prot_data1K <- prot_data1K[,(colnames(prot_data1K) %in% colnames(RNAseq_vsd))]
+    prot_data1K <-prot_data1K[,c(colnames(RNAseq_vsd))]
+    prot_selected <- t(prot_data1K[,c(DSS_samples)])
+    dim(DSS_selected)
+    
+    dim(RNA_selected)
+    cor_RNA_DSS <-cor(RNA_selected,DSS_selected,method = c("spearman"))
+    cor_RNA_DSS <- as.data.frame(cor_RNA_DSS)
+    
+    cor_RNA_DSS <-cor_RNA_DSS[colSums(!is.na(cor_RNA_DSS)) > 0]
+    cor_RNA_DSS_abs <- abs(cor_RNA_DSS)
+    #gene_dssminvalue <- apply(cor_RNA_DSS,1,min)
+    #gene_dssmaxvalue <- apply(cor_RNA_DSS,1,max)
+    
+    gene_abs_dssmaxvalue <- apply(cor_RNA_DSS_abs,1,max)
+    
+    gene_abs_dssmaxvalue <- sort(gene_abs_dssmaxvalue,decreasing = TRUE)
+    #hist(gene_abs_dssmaxvalue)
+    selected_DSRT_genes <- names(gene_abs_dssmaxvalue[gene_abs_dssmaxvalue >0.5])
+    #print(length(selected_DSRT_genes))
+    
+    #dim(prot_selected);
+    prot_selected <- t(prot_data1K[,c(DSS_samples)])
+    cor_prot_DSS <-cor(prot_selected,DSS_selected,method = c("spearman"))
+    cor_prot_DSS <- as.data.frame(cor_prot_DSS)
+    
+    cor_prot_DSS <-cor_prot_DSS[colSums(!is.na(cor_prot_DSS)) > 0]
+    cor_prot_DSS_abs <- abs(cor_prot_DSS)
+    #prot_dssminvalue <- apply(cor_prot_DSS,1,min)
+    #prot_dssmaxvalue <- apply(cor_prot_DSS,1,max)
+    
+    protein_abs_dssmaxvalue <- apply(cor_prot_DSS_abs,1,max)
+    
+    protein_abs_dssmaxvalue <- sort(protein_abs_dssmaxvalue,decreasing = TRUE)
+    #hist(protein_abs_dssmaxvalue)
+    selected_DSRT_protein <- names(protein_abs_dssmaxvalue[protein_abs_dssmaxvalue>0.5])
+    #print(length(selected_DSRT_protein))
+    
+    RNAseq_vsd  <- subset(RNAseq_vsd, rownames(RNAseq_vsd) %in% selected_DSRT_genes)
+    prot_data1K  <- subset(prot_data1K, rownames(prot_data1K) %in% selected_DSRT_protein)
+    RNAseq_vsd_normalized <- t(RNAseq_vsd)
+    prot_data1K_normalized <- t(prot_data1K)
+    dist_RNAseq <- as.matrix(dist(RNAseq_vsd_normalized))
+    dist_Proteomics <- as.matrix(dist(prot_data1K_normalized))
+    W1 <- affinityMatrix(dist_RNAseq, K = 12, sigma = 0.5)
+    W2 <- affinityMatrix(dist_Proteomics, K = 12, sigma = 0.5)
+    W = SNF(list(W1,W2), 12, 12)
+    #print(W)
+    clusters <- spectralClustering(W, K = 2)
+    snf_sc <- data.frame(patient_id = as.character(colnames(W)),snf_cluster = spectralClustering(W, K = 2))
+    pdata_snfcluster <- merge(pData,snf_sc,by = c("patient_id"))
+    res.cox <- NULL
+    res.cox <- coxph(Surv(pdata_snfcluster$time_days, pdata_snfcluster$status) ~ pdata_snfcluster$snf_cluster + pdata_snfcluster$sex + pdata_snfcluster$age + pdata_snfcluster$ELN2017, data =  pdata_snfcluster)
+    #summary(res.cox)
+    coef_coxph <- summary(res.cox)$coefficients[1, 1]
+    exp.coef_coxph <-summary(res.cox)$coefficients[1, 2]
+    se_coef_coxph <- summary(res.cox)$coefficients[1, 3]
+    pvalue_coef_coxph <- summary(res.cox)$coefficients[1, 5]
+    DSS_cox_df[i,2] <- length(selected_DSRT_genes)
+    DSS_cox_df[i,3]<- length(selected_DSRT_protein)
+    DSS_cox_df[i,4] <- coef_coxph 
+    DSS_cox_df[i,5] <- exp.coef_coxph
+    DSS_cox_df[i,6] <- se_coef_coxph
+    DSS_cox_df[i,7] <- pvalue_coef_coxph
+    DSS_cox_df[i,8] <- sapply(list(selected_DSRT_genes), paste, collapse = ",")
+    DSS_cox_df[i,9] <- sapply(list(selected_DSRT_protein), paste, collapse = ",")
+    print(pvalue_coef_coxph)
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+DSS_cox_df <- as.data.frame(DSS_cox_df)
+colnames(DSS_cox_df) <- c("Drug_ID","diff.gene.count","diff.protein.count","coef_coxph","exp.coef_coxph","se_coef_coxph","pvalue_coef_coxph","diff.genes","diff.proteins")
+write.csv(DSS_cox_df, file = "DSS_cox_528drugs_selected.csv",row.names = FALSE)
+```
+
+
+
+```{r}
+
+#DSS_selected<- DSS_selected[,c(55:57,60)] 
+
+DSS_samples <- rownames(DSS_selected)
+#rownames(t(RNAseq_vsd))
+RNA_selected <-t(RNAseq_vsd[,c(DSS_samples)])
+#prot_data <- assay(MAexp@ExperimentList$Proteomics)
+prot_selected <- t(prot_data1K[,c(DSS_samples)])
+cor_RNA_DSS <-cor(RNA_selected,DSS_selected,method = c("spearman"))
+cor_RNA_DSS <- as.data.frame(cor_RNA_DSS)
+
+cor_RNA_DSS <-cor_RNA_DSS[colSums(!is.na(cor_RNA_DSS)) > 0]
+cor_RNA_DSS_abs <- abs(cor_RNA_DSS)
+#gene_dssminvalue <- apply(cor_RNA_DSS,1,min)
+#gene_dssmaxvalue <- apply(cor_RNA_DSS,1,max)
+
+gene_abs_dssmaxvalue <- apply(cor_RNA_DSS_abs,1,max)
+
+gene_abs_dssmaxvalue <- sort(gene_abs_dssmaxvalue,decreasing = TRUE)
+#hist(gene_abs_dssmaxvalue)
+selected_DSRT_genes <- names(gene_abs_dssmaxvalue[gene_abs_dssmaxvalue >0.5])
+#length(selected_DSRT_genes)
+
+#dim(prot_selected);
+prot_selected <- t(prot_data1K[,c(DSS_samples)])
+cor_prot_DSS <-cor(prot_selected,DSS_selected,method = c("spearman"))
+cor_prot_DSS <- as.data.frame(cor_prot_DSS)
+
+cor_prot_DSS <-cor_prot_DSS[colSums(!is.na(cor_prot_DSS)) > 0]
+cor_prot_DSS_abs <- abs(cor_prot_DSS)
+#prot_dssminvalue <- apply(cor_prot_DSS,1,min)
+#prot_dssmaxvalue <- apply(cor_prot_DSS,1,max)
+
+protein_abs_dssmaxvalue <- apply(cor_prot_DSS_abs,1,max)
+
+protein_abs_dssmaxvalue <- sort(protein_abs_dssmaxvalue,decreasing = TRUE)
+#hist(protein_abs_dssmaxvalue)
+selected_DSRT_protein <- names(protein_abs_dssmaxvalue[protein_abs_dssmaxvalue>0.5])
+#length(selected_DSRT_protein)
+
+RNAseq_vsd  <- subset(RNAseq_vsd, rownames(RNAseq_vsd) %in% selected_DSRT_genes)
+prot_data1K  <- subset(prot_data1K, rownames(prot_data1K) %in% selected_DSRT_protein)
+RNAseq_vsd_normalized <- t(RNAseq_vsd)
+prot_data1K_normalized <- t(prot_data1K)
+dist_RNAseq <- as.matrix(dist(RNAseq_vsd_normalized))
+dist_Proteomics <- as.matrix(dist(prot_data1K_normalized))
+W1 <- affinityMatrix(dist_RNAseq, K = 12, sigma = 0.5)
+W2 <- affinityMatrix(dist_Proteomics, K = 12, sigma = 0.5)
+W = SNF(list(W1,W2), 12, 12)
+clusters <- spectralClustering(W, K = 2)
+snf_sc <- data.frame(patient_id = as.character(colnames(W)),snf_cluster = spectralClustering(W, K = 2))
+pdata_snfcluster <- merge(pData,snf_sc,by = c("patient_id"))
+
+res.cox <- coxph(Surv(pdata_snfcluster$time_days, pdata_snfcluster$status) ~ pdata_snfcluster$snf_cluster + pdata_snfcluster$sex + pdata_snfcluster$age + pdata_snfcluster$ELN2017, data =  pdata_snfcluster)
+#summary(res.cox)
+coef_coxph <- summary(res.cox)$coefficients[1, 1]
+exp.coef_coxph <-summary(res.cox)$coefficients[1, 2]
+se_coef_coxph <- summary(res.cox)$coefficients[1, 3]
+pvalue_coef_coxph <- summary(res.cox)$coefficients[1, 5]
+
+```
+

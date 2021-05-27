@@ -37,3 +37,9 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Ignore All (xlsx) files
+*.xlsx
+
+# Ignore All (xlsx) files
+*.csv

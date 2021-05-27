@@ -1,0 +1,474 @@
+---
+title: "AML multiomics- SNF analysis"
+author:16/09/2020"
+output: html_document
+---
+
+###  Setting clean envt and memory
+```{r}
+rm(list=ls())
+gc()
+detach_package <- function(pkg, character.only = FALSE)
+{
+  if(!character.only)
+  {
+    pkg <- deparse(substitute(pkg))
+  }
+  search_item <- paste("package", pkg, sep = ":")
+  while(search_item %in% search())
+  {
+    detach(search_item, unload = TRUE, character.only = TRUE)
+  }
+}
+detach_package("plyr", TRUE)
+```
+
+```{r}
+library(MultiAssayExperiment)
+library(S4Vectors)
+load("/home/tojo.james/AMLmultiomics/AML_MAexp_v03.RData")
+MAexp@ExperimentList$RNAseq
+
+colData(MAexp)[1:4, 1:4]
+experiments(MAexp)
+sampleMap(MAexp)
+pData
+summary(complete.cases(MAexp))
+assays(MAexp)
+
+library(UpSetR)
+upsetSamples(MAexp)
+pData
+```
+
+### Selected experiments
+
+```{r}
+dim(assay(MAexp@ExperimentList$RNAseq))
+dim(assay(MAexp@ExperimentList$Proteomics))
+dim(assays(MAexp@ExperimentList$Mutations))
+#assays(MAexp@ExperimentList$Mutations)$mut.pres
+#assays(MAexp@ExperimentList$Mutations)$mut.count
+#assay(MAexp@ExperimentList$DSRT)
+dim(assay(MAexp@ExperimentList$DSRT))
+#rowData(MAexp@ExperimentList$Proteomics)
+#MAexp[[1]]
+#MAexp[[2]]
+#MAexp[[3]]
+#MAexp[[4]]
+```
+
+### RNA normalization
+
+```{r}
+library(DESeq2)
+cts <- assay(MAexp@ExperimentList$RNAseq)
+coldata <- pData[(pData$patient_id %in% colnames(cts)),]
+coldata <- coldata[colnames(cts),]    
+coldata <- as.data.frame(coldata[c("patient_id","sex","ELN2017")])
+rownames(coldata) <- NULL
+
+dim(coldata)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ 1 + sex)
+
+?varianceStabilizingTransformation
+#### Not corrected for sex (blind = TRUE)
+vsd <- varianceStabilizingTransformation(dds,blind = TRUE)
+dists <- dist(t(assay(vsd)))
+plot(hclust(dists))
+vsd@colData
+```
+
+
+
+
+
+#### Selecteding only 1000 most variant genes across samples
+```{r}
+ntop <- 52606
+#ntop <- 50
+dim(assay(vsd))
+
+rv <- rowVars(assay(vsd))
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+## get the DESeqTransform object with the top 500 most variable genes
+vsd1K <- vsd[select,]
+RNAseq_vsd <- assay(vsd1K)
+RNAseq_vsd  <- RNAseq_vsd[which(rowMeans(!is.na(RNAseq_vsd)) > 0.99), ]
+dim(RNAseq_vsd)
+
+```
+
+
+#### Selecteding only 1000 most variant proteins across samples  
+```{r}
+ntop <-8632
+prot_data <- assay(MAexp@ExperimentList$Proteomics)
+#head(prot_data)
+dim(prot_data)
+prot_data <- prot_data[which(rowMeans(!is.na(prot_data)) > 0.99),]
+dim(prot_data)
+
+rv <- rowVars(prot_data)
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+## get the DESeqTransform object with the top 500 most variable genes
+prot_data1K <- prot_data[select,]
+prot_data1K <- prot_data1K[,(colnames(prot_data1K) %in% colnames(RNAseq_vsd))]
+prot_data1K <-prot_data1K[,c(colnames(RNAseq_vsd))]
+dim(prot_data1K)
+
+gene_protein_dictionary <- as.data.frame(rowData(MAexp@ExperimentList$Proteomics))
+
+protein_match_ensembl_id <- as.character(gene_protein_dictionary[gene_protein_dictionary$hgnc_symbol %in% rownames(prot_data1K),][['ensembl_gene_id']])
+```
+
+#### Diff Expression (Gene & proteomics) based on DSRT
+```{r}
+# c(55:57,60)(0.00886)## Chemoagents 55:60(0.019210) 50:60 50:100 50:70 
+DSS_selected <- t(assay(MAexp@ExperimentList$DSRT))
+DSS_selected<- DSS_selected[,c(55:57,60)] 
+DSS_samples <- rownames(DSS_selected)
+#rownames(t(RNAseq_vsd))
+RNA_selected <-t(RNAseq_vsd[,c(DSS_samples)])
+#prot_data <- assay(MAexp@ExperimentList$Proteomics)
+prot_selected <- t(prot_data1K[,c(DSS_samples)])
+cor_RNA_DSS <-cor(RNA_selected,DSS_selected,method = c("spearman"))
+cor_RNA_DSS <- as.data.frame(cor_RNA_DSS)
+
+cor_RNA_DSS <-cor_RNA_DSS[colSums(!is.na(cor_RNA_DSS)) > 0]
+cor_RNA_DSS_abs <- abs(cor_RNA_DSS)
+gene_dssminvalue <- apply(cor_RNA_DSS,1,min)
+gene_dssmaxvalue <- apply(cor_RNA_DSS,1,max)
+
+gene_abs_dssmaxvalue <- apply(cor_RNA_DSS_abs,1,max)
+
+gene_abs_dssmaxvalue <- sort(gene_dssmaxvalue,decreasing = TRUE)
+hist(gene_abs_dssmaxvalue)
+selected_DSRT_genes <- names(gene_abs_dssmaxvalue[gene_abs_dssmaxvalue >0.5])
+length(selected_DSRT_genes)
+
+dim(prot_selected);
+prot_selected <- t(prot_data1K[,c(DSS_samples)])
+cor_prot_DSS <-cor(prot_selected,DSS_selected,method = c("spearman"))
+cor_prot_DSS <- as.data.frame(cor_prot_DSS)
+
+cor_prot_DSS <-cor_prot_DSS[colSums(!is.na(cor_prot_DSS)) > 0]
+cor_prot_DSS_abs <- abs(cor_prot_DSS)
+prot_dssminvalue <- apply(cor_prot_DSS,1,min)
+prot_dssmaxvalue <- apply(cor_prot_DSS,1,max)
+
+protein_abs_dssmaxvalue <- apply(cor_prot_DSS_abs,1,max)
+
+protein_abs_dssmaxvalue <- sort(prot_dssmaxvalue,decreasing = TRUE)
+hist(protein_abs_dssmaxvalue)
+selected_DSRT_protein <- names(protein_abs_dssmaxvalue[protein_abs_dssmaxvalue>0.5])
+length(selected_DSRT_protein)
+```
+
+
+
+##### Subset based on protein-gene match
+
+```{r}
+#RNAseq_vsd  <- subset(RNAseq_vsd, (substring(rownames(RNAseq_vsd),1,15) %in% protein_match_ensembl_id))
+#dim(RNAseq_vsd)
+```
+##### Select gene expression based on DSRT genes
+```{r}
+RNAseq_vsd  <- subset(RNAseq_vsd, rownames(RNAseq_vsd) %in% selected_DSRT_genes)
+dim(RNAseq_vsd)
+```
+
+##### Select protein expression based on DSRT genes
+```{r}
+prot_data1K  <- subset(prot_data1K, rownames(prot_data1K) %in% selected_DSRT_protein)
+dim(prot_data1K)
+```
+
+
+
+#### Mutation data 
+```{r}
+mutation_count_data <-assays(MAexp@ExperimentList$Mutations)$mut.pres
+dim(mutation_count_data)
+table(mutation_count_data[c("FLT3_ITD"),])
+
+mutation_count_data <-mutation_count_data[,c(colnames(RNAseq_vsd))]
+```
+
+
+
+### Data integration using SNF
+##### In this case, rows of both datasets represent patients, while columns represent gene expression and methylation respectively.
+
+```{r}
+library(SNFtool)
+#data(Data1)
+#data(Data2)
+#head(Data1)
+#head(t(RNAseq_vsd))
+dim(t(RNAseq_vsd))
+dim(t(prot_data1K))
+RNAseq_vsd_normalized <- t(RNAseq_vsd)
+prot_data1K_normalized <- t(prot_data1K)
+mutation_count_norm <-t(mutation_count_data)
+
+write.csv(RNAseq_vsd_normalized,file = "RNAseq_vsd_normalized.csv")
+write.csv(prot_data1K_normalized,file = "prot_data1K_normalized.csv")
+
+dist_RNAseq <- as.matrix(dist(RNAseq_vsd_normalized))
+dist_Proteomics <- as.matrix(dist(prot_data1K_normalized))
+dist_mutation_count <- as.matrix(dist(mutation_count_norm))
+
+dim(dist_Proteomics)
+
+dim(dist_RNAseq)
+```
+
+### Similarity matrix 
+
+```{r}
+is.matrix(dist_RNAseq)
+is.matrix(dist_Proteomics)
+
+#dist_Proteomics[c("A1BG"),]
+#dist_RNAseq[c("ENSG00000129824.16_4"),]
+?affinityMatrix
+?SNF
+
+W1 <- affinityMatrix(dist_RNAseq, K = 12, sigma = 0.5)
+estimateNumberOfClustersGivenGraph(W1, NUMC=2:10) 
+displayClustersWithHeatmap(W1, spectralClustering(W1, K = 2))
+W2 <- affinityMatrix(dist_Proteomics, K = 12, sigma = 0.5)
+estimateNumberOfClustersGivenGraph(W2, NUMC=2:10) 
+displayClustersWithHeatmap(W2, spectralClustering(W2, K = 2))
+
+W = SNF(list(W1,W2), 12, 12)
+
+## https://cran.r-project.org/web/packages/Spectrum/vignettes/Spectrum_vignette.pdf
+
+```
+
+
+
+```{r}
+estimateNumberOfClustersGivenGraph(W, NUMC=2:5) 
+displayClustersWithHeatmap(W, spectralClustering(W, K = 2))
+
+```
+
+
+```{r}
+clusters <- spectralClustering(W, K = 2)
+clusters
+table(clusters)
+```
+
+```{r}
+spectralClustering
+d <- rowSums(W)
+D <- diag(d)
+Lapl_W <- D - W
+Lapl_W_graph <-graph_from_adjacency_matrix(Lapl_W,mode = c("undirected"),weighted = TRUE)
+embed <- embed_laplacian_matrix(Lapl_W_graph, 2)
+plot(embed$X)
+```
+
+
+```{r}
+similarity_W <- W/max(W)
+# average-linkage clustering method
+d = as.dist(similarity_W)
+cc = hclust(d, method = "average")
+
+# plot dendrogram
+plot(hclust(d, method = "average"))
+?rect.hclust
+rect.hclust(cc, k=2, border="red")
+
+
+# draw blue borders around clusters
+clusters.list = rect.hclust(cc, k = 2, border="blue")
+
+rect.hclust(cc, h = 50)
+cutree(cc, k = 2)
+
+plot(rect.hclust(cc, k=2, border="red"))
+
+```
+
+
+#### Graph
+###### https://github.com/BeautyOfWeb/Clustering-TCGAFiveCancerTypes/blob/master/vignettes/ANF%20for%20Cancer%20Patient%20Clustering.Rmd
+```{r}
+library(igraph)
+library(lsa)
+g <-graph.data.frame(W,directed=FALSE)
+cl_g <- cluster_louvain(g)
+coords = layout_with_fr(g)
+plot(g, layout=coords, vertex.label=clusters, vertex.size=10)
+c1 = cluster_fast_greedy(g)
+```
+```{r}
+install.packages('lsa')
+```
+
+
+```{r}
+
+plotAlluvial(W, 2:5)
+```
+```{r}
+plotAlluvial(W1, 2:5)
+```
+
+```{r}
+plotAlluvial(W2, 2:5)
+```
+
+
+
+```{r}
+#snf_sc <- list()
+snf_sc <- data.frame(patient_id = as.character(colnames(W)),snf_cluster = spectralClustering(W, K = 2))
+#snf_sc$sample <- colnames(W)
+#snf_sc$cluster <- spectralClustering(W, K = 2)
+```
+#### Concordance tests
+```{r}
+ConcordanceMatrix = concordanceNetworkNMI(list(W, W1,W2),C = 2 )
+ConcordanceMatrix
+```
+
+
+
+
+
+```{r}
+pdata_snfcluster <- merge(pData,snf_sc,by = c("patient_id"))
+colnames(pdata_snfcluster)
+cor.test(as.numeric(pdata_snfcluster$blast_bm_percentage),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(pdata_snfcluster$blast_blood_abs),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(pdata_snfcluster$hb),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(pdata_snfcluster$tpk),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(as.factor(pdata_snfcluster$kasryotype)),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(as.factor(pdata_snfcluster$CN_AML)),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(as.factor(pdata_snfcluster$cr)),as.numeric(pdata_snfcluster$snf_cluster))
+cor.test(as.numeric(as.factor(pdata_snfcluster$status)),as.numeric(pdata_snfcluster$snf_cluster))
+#cor.test(as.numeric(pdata_snfcluster$time_days),as.numeric(pdata_snfcluster$snf_cluster))
+
+table(pData$ELN2017)
+table(pData$BM_or_PB)
+table(pData$sex)
+table(pData$status)
+
+
+
+
+library(ggplot2)
+df <- data.frame(cluster = as.character(pdata_snfcluster$snf_cluster),status = as.character(pdata_snfcluster$status),blast_bm_perc = as.numeric(pdata_snfcluster$blast_bm_percentage))
+
+ggplot(df, aes(x=cluster, y=blast_bm_perc)) + 
+  geom_boxplot(fill="gray")+
+  labs(title="Blast Percentage Bonemarrow ",x="Cluster", y = "Blast_bm_percentage")+
+  theme_classic()
+
+ggplot(df, aes(cluster, ..count..)) + geom_bar(aes(fill = status), position = "dodge")
+
+```
+
+#### Blast Bonemarrow percentage vs SNF cluster
+```{r}
+colour.breaks <- 2
+#This will assign each sample to one of colour.breaks colour bins between green and red.
+colFunc <- colorRampPalette(c("green", "red"))
+colours <- colFunc(colour.breaks)[as.numeric(cut(pdata_snfcluster$blast_bm_percentage,breaks=colour.breaks))]
+plotAlluvial(W, 2:5,col = colours)
+#tail(pdata_snfcluster)
+```
+
+#### Status vs SNF cluster
+```{r}
+colour.breaks <- 2
+#This will assign each sample to one of colour.breaks colour bins between green and red.
+colFunc <- colorRampPalette(c("green", "red"))
+colours <- colFunc(colour.breaks)[as.numeric(cut(pdata_snfcluster$status,breaks=colour.breaks))]
+plotAlluvial(W, 2:5,col = colours)
+#tail(pdata_snfcluster)
+```
+#### Status NMI
+```{r}
+# perform clustering on the fused network.
+clustering = spectralClustering(W,2);
+label = pdata_snfcluster$status
+# use NMI to measure the goodness of the obtained labels.
+NMI = calNMI(clustering, label)
+NMI
+```
+
+##### Accuracy
+#### Predicting the new labels with label propagation
+```{r}
+# Create the training and test data
+label = pdata_snfcluster$snf_cluster
+dataL= list(t(RNAseq_vsd),t(prot_data1K))
+dataL = lapply(dataL, standardNormalization)
+n = floor(0.8*length(label)) # number of training cases
+trainSample = sample.int(length(label), n)
+train = data.frame(lapply(dataL, function(x) x[trainSample, ])) # Use the first 150 samples for training
+test = data.frame(lapply(dataL, function(x) x[-trainSample, ])) # Test the rest of the data set
+groups = label[trainSample]
+
+# Set the other
+K = 12
+alpha = 0.5
+t = 20
+method = TRUE
+
+# Apply the prediction function to the data
+# newLabel = groupPredict(train,test,groups,K,alpha,t,method)
+# dim(test)
+# dim(train)
+# # Compare the prediction accuracy
+# accuracy = sum(label[-trainSample] == newLabel[-c(1:n)])/(length(label) - n)
+
+```
+
+
+#### Survival analysis
+Reference paper: https://www.nature.com/articles/leu201748/figures/1
+Reference paper Wang et al 2018 https://uu.diva-portal.org/smash/get/diva2:1284482/FULLTEXT01.pdf
+```{r}
+pdata_snfcluster$time_cens_allo_days
+pdata_snfcluster$time_days
+
+library("survival")
+library("survminer")
+table(pdata_snfcluster$status)
+table(pdata_snfcluster$snf_cluster)
+res.cox <- coxph(Surv(pdata_snfcluster$time_days, pdata_snfcluster$status) ~ pdata_snfcluster$snf_cluster + pdata_snfcluster$sex + pdata_snfcluster$age + pdata_snfcluster$ELN2017, data =  pdata_snfcluster)
+summary(res.cox)
+
+
+```
+```{r}
+ggsurvplot(survfit(res.cox, data = pdata_snfcluster), color = "#2E9FDF",
+           ggtheme = theme_minimal())
+```
+
+```{r}
+# Survival curves
+fit <- survfit(res.cox, data = pdata_snfcluster)
+ggsurvplot(survfit(res.cox, data = pdata_snfcluster), legend.labs=c("sex=1", "sex=2"),ggtheme = theme_minimal())
+```
+
+
+```{r}
+res.cox <- coxph(Surv(pdata_snfcluster$time_cens_allo_days, pdata_snfcluster$status_cens_allo) ~ pdata_snfcluster$snf_cluster + pdata_snfcluster$sex + pdata_snfcluster$age + pdata_snfcluster$ELN2017, data =  pdata_snfcluster)
+summary(res.cox)
+```
+

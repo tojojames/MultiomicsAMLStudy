@@ -1,0 +1,387 @@
+---
+title: "AMLmultiomics_GSVA"
+author: "Tojo James"
+date: "22/02/2021"
+output: html_document
+---
+
+###  Setting clean envt and memory
+```{r}
+rm(list=ls())
+gc()
+detach_package <- function(pkg, character.only = FALSE)
+{
+  if(!character.only)
+  {
+    pkg <- deparse(substitute(pkg))
+  }
+  search_item <- paste("package", pkg, sep = ":")
+  while(search_item %in% search())
+  {
+    detach(search_item, unload = TRUE, character.only = TRUE)
+  }
+}
+detach_package("plyr", TRUE)
+```
+
+# Install GSVA
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("GSVA")
+library(GSVA)
+```
+
+## test data 
+```{r}
+p <- 20000 ## number of genes
+n <- 30 ## number of samples
+nGS <- 100 ## number of gene sets
+min.sz <- 10 ## minimum gene set size
+max.sz <- 100 ## maximum gene set size
+X <- matrix(rnorm(p*n), nrow=p, dimnames=list(1:p, 1:n))
+dim(X)
+
+gs <- as.list(sample(min.sz:max.sz, size=nGS, replace=TRUE)) ## sample gene set sizes
+gs <- lapply(gs, function(n, p) sample(1:p, size=n, replace=FALSE), p) ## sample gene sets
+es.max <- gsva(X, gs, mx.diff=FALSE, verbose=FALSE, parallel.sz=1)
+es.dif <- gsva(X, gs, mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+par(mfrow=c(1,2), mar=c(4, 4, 4, 1))
+plot(density(as.vector(es.max)), main="Maximum deviation from zero", xlab="GSVA score", lwd=2, las=1, xaxt="n", xlim=c(-0.75, 0.75), cex.axis=0.8)
+axis(1, at=seq(-0.75, 0.75, by=0.25), labels=seq(-0.75, 0.75, by=0.25), cex.axis=0.8)
+plot(density(as.vector(es.dif)), main="Difference between largest\npositive and negative deviations", xlab="GSVA score", lwd=2, las=1, xaxt="n", xlim=c(-0.75, 0.75), cex.axis=0.8)
+axis(1, at=seq(-0.75, 0.75, by=0.25), labels=seq(-0.75, 0.75, by=0.25), cex.axis=0.8)
+
+```
+### install
+```{r}
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("GSEABase")
+# 
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("GSVAdata")
+```
+
+
+### Test public data
+```{r}
+library(GSEABase)
+library(GSVAdata)
+data(c2BroadSets)
+c2BroadSets
+```
+
+
+```{r}
+data(leukemia)
+leukemia_eset
+table(leukemia_eset$subtype)
+c2BroadSets@.Data[[1]]
+
+c2_cp_entrez_v7.2 <- getGmt("c2.cp.v7.2.entrez.gmt", geneIdType=EntrezIdentifier(), collectionType=BroadCollection(category="c2"), sep="\t")
+
+# https://www.gsea-msigdb.org/gsea/msigdb/download_file.jsp?filePath=/msigdb/release/7.2/c6.all.v7.2.entrez.gmt
+
+c6.all.v7.2 <- getGmt("c6.all.v7.2.entrez.gmt", geneIdType=EntrezIdentifier(), collectionType=BroadCollection(category="c2"), sep="\t")
+
+filtered_eset <- genefilter::nsFilter(leukemia_eset, require.entrez=TRUE, remove.dupEntrez=TRUE, var.func=IQR, var.filter=TRUE, var.cutoff=0.5, filterByQuantile=TRUE, feature.exclude="^AFFX")
+
+leukemia_filtered_eset <- filtered_eset$eset
+leukemia_filtered_eset@assayData$exprs
+```
+
+### GSVA
+```{r}
+#file.remove(paste(cacheDir, list.files(cacheDir, pattern=cachePrefix), sep="/"))
+cacheDir <- system.file("extdata", package="GSVA")
+cachePrefix <- "cache4vignette_"
+
+cache(leukemia_es <- gsva(leukemia_filtered_eset, c2BroadSets,min.sz=10, max.sz=500, verbose=TRUE),dir=cacheDir, prefix=cachePrefix)
+leukemia_es
+table(leukemia_eset$subtype)
+adjPvalueCutoff <- 0.001
+logFCcutoff <- log2(2)
+
+library(limma)
+
+design <- model.matrix(~ factor(leukemia_es$subtype))
+colnames(design) <- c("ALL", "MLLvsALL")
+fit <- lmFit(leukemia_es, design)
+fit <- eBayes(fit)
+allGeneSets <- topTable(fit, coef="MLLvsALL", number=Inf)
+DEgeneSets <- topTable(fit, coef="MLLvsALL", number=Inf,p.value=adjPvalueCutoff, adjust="BH")
+res <- decideTests(fit, p.value=adjPvalueCutoff)
+summary(res)
+res_table <- as.data.frame(res@.Data)
+res_table[res_table$ALL|res_table$MLLvsALL!=0,]
+?lmFit
+c2BroadSets@.Data[[20]]
+```
+### RNASeq data
+
+```{r}
+data(commonPickrellHuang)
+stopifnot(identical(featureNames(huangArrayRMAnoBatchCommon_eset),featureNames(pickrellCountsArgonneCQNcommon_eset)))
+stopifnot(identical(sampleNames(huangArrayRMAnoBatchCommon_eset),sampleNames(pickrellCountsArgonneCQNcommon_eset)))
+pickrellCountsArgonneCQNcommon_eset@assayData$exprs
+
+
+esrnaseq <- gsva(pickrellCountsArgonneCQNcommon_eset, c2_cp_entrez_v7.2, min.sz=5, max.sz=500, kcdf="Poisson", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+
+#esrnaseq@assayData$exprs
+
+
+```
+
+
+
+```{r}
+library(MultiAssayExperiment)
+library(S4Vectors)
+load("/home/tojo.james/AMLmultiomics/AML_MAexp_v05.RData")
+
+
+colData(MAexp)[1:4, 1:4]
+experiments(MAexp)
+sampleMap(MAexp)
+pData
+summary(complete.cases(MAexp))
+assays(MAexp)
+
+library(UpSetR)
+upsetSamples(MAexp)
+pData
+```
+### RNA normalization
+
+```{r}
+library(DESeq2)
+cts <- assay(MAexp@ExperimentList$RNAseq)
+coldata <- pData[(pData$patient_id %in% colnames(cts)),]
+coldata <- coldata[colnames(cts),]    
+coldata <- as.data.frame(coldata[c("patient_id","sex","ELN2017")])
+rownames(coldata) <- NULL
+
+dim(coldata)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ 1 + sex)
+
+?varianceStabilizingTransformation
+#### Not corrected for sex (blind = TRUE)
+vsd <- varianceStabilizingTransformation(dds,blind = TRUE)
+dists <- dist(t(assay(vsd)))
+plot(hclust(dists))
+vsd@colData
+```
+
+
+#### Selecteding only 1000 most variant genes across samples
+```{r}
+ntop <- 52606
+#ntop <- 50
+dim(assay(vsd))
+
+rv <- rowVars(assay(vsd))
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+
+## get the DESeqTransform object with the top 500 most variable genes
+vsd1K <- vsd[select,]
+RNAseq_vsd <- assay(vsd1K)
+RNAseq_vsd  <- RNAseq_vsd[which(rowMeans(!is.na(RNAseq_vsd)) > 0.99), ]
+dim(RNAseq_vsd)
+
+```
+
+#### AML data GSVA analysis with variance stability (vsd)
+
+```{r}
+row.names(RNAseq_vsd) <- gsub("\\..*","", row.names(RNAseq_vsd))
+#biocLite("org.Hs.eg.db")
+#biocLite("clusterProfiler")
+```
+
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+gene.df <- bitr(row.names(RNAseq_vsd), fromType = "ENSEMBL",
+                        toType = c( "ENTREZID"),
+                        OrgDb = org.Hs.eg.db)
+
+RNAseq_vsd_id <-merge(gene.df,RNAseq_vsd,by.x=c("ENSEMBL"),by.y=c("row.names"))
+RNAseq_vsd_id = RNAseq_vsd_id[!duplicated(RNAseq_vsd_id$ENTREZID),]
+row.names(RNAseq_vsd_id) <- RNAseq_vsd_id$ENTREZID
+
+length(unique(RNAseq_vsd_id$ENTREZID))
+dim(unique(RNAseq_vsd_id))
+
+dim(unique(RNAseq_vsd_id))
+row.names(RNAseq_vsd_id) <- RNAseq_vsd_id$ENTREZID
+RNAseq_vsd_id
+RNAseq_vsd_id <-RNAseq_vsd_id[,-c(1:2)]
+
+MAexp@colData
+RNAseq_vsd_eset<-new("ExpressionSet", exprs=as.matrix(RNAseq_vsd_id))
+RNAseq_vsd_eset@assayData$exprs
+
+pickrellCountsArgonneCQNcommon_eset
+huangArrayRMAnoBatchCommon_eset
+#c2_cp_entrez_v7.2
+#c2BroadSets
+#c6.all.v7.2
+#c6.all.v7.2.entrez.gmt
+#drug_gene_nov2020
+#c5.go.v7.2.entrez.gmt
+#c5_enrez <- getGmt("c5.go.v7.2.entrez.gmt", geneIdType=EntrezIdentifier(), sep="\t")
+RNAseq_vsd_gsva <- gsva(as.matrix(RNAseq_vsd_id), c2BroadSets, min.sz=1, max.sz=500, kcdf="Poisson", mx.diff=TRUE, verbose=FALSE, parallel.sz=1)
+dim(RNAseq_vsd_gsva)
+#c2BroadSets
+```
+
+
+```{r}
+c5_enrez
+```
+
+
+
+```{r}
+RNAseq_vsd_gsva_df <- as.data.frame(RNAseq_vsd_gsva)
+
+RNAseq_vsd_gsva_df
+
+RNAseq_vsd_gsva_df[which.max(RNAseq_vsd_gsva_df$ALBB13011),]
+RNAseq_vsd_gsva_df[which.min(RNAseq_vsd_gsva_df$ALBB13011),]
+
+
+```
+
+### Subtype
+```{r}
+#RNAseq_vsd_gsva$
+  
+meta_MAexp <- as.data.frame(MAexp@colData)[c('ELN2017')]
+meta_MAexp$ELN2017
+meta_MAexp$ELN2017[meta_MAexp$ELN2017=="Intermediate"] <- "non-Adverse"
+meta_MAexp$ELN2017[meta_MAexp$ELN2017=="Favorable"] <- "non-Adverse"
+
+meta_MAexp[colnames(RNAseq_vsd_gsva_df),]
+
+unique(MAexp@colData$ELN2017)
+colnames(RNAseq_vsd_gsva_df)
+#design <- model.matrix(~ factor(leukemia_eset$subtype))
+
+design <- model.matrix(~ factor(meta_MAexp[colnames(RNAseq_vsd_gsva_df),]))
+#colnames(design) <- c("ALL", "MLLvsALL")
+
+colnames(design) <- c("non-Adverse","Adverse vs non-Adverse")
+dim(RNAseq_vsd_gsva_df);dim(design)
+fit <- lmFit(RNAseq_vsd_gsva_df, design)
+fit <- eBayes(fit)
+allGeneSets <- topTable(fit, coef="Adverse vs non-Adverse", number=Inf)
+DEgeneSets <- topTable(fit, coef="Adverse vs non-Adverse", number=Inf, p.value=adjPvalueCutoff, adjust="BH")
+res <- decideTests(fit, p.value=adjPvalueCutoff)
+summary(res)
+?lmFit
+
+pathways_ad_vs_nonad <- as.data.frame(res)
+pathways_ad_vs_nonad[pathways_ad_vs_nonad$`Adverse vs non-Adverse`>0,]
+pathways_ad_vs_nonad[pathways_ad_vs_nonad$`Adverse vs non-Adverse`<0 & pathways_ad_vs_nonad$`non-Adverse`>0,]
+
+```
+
+##### I looked to the. GSVA and tested in our AML RNAseq data. In the initial try I generated pathway based scores for all the 117 samples and looked if the pathways  can be correlated  ELN classification
+
+```{r}
+meta_MAexp <- as.data.frame(MAexp@colData)[c('ELN2017')]
+meta_MAexp$ELN2017
+# https://genomicsclass.github.io/book/pages/expressing_design_formula.html
+design <- model.matrix(~ factor(meta_MAexp[colnames(RNAseq_vsd_gsva_df),]) + 0)
+colnames(design) <- c("Adverse","Favorable","Intermediate")
+
+fit <- lmFit(RNAseq_vsd_gsva_df, design)
+fit <- eBayes(fit)
+
+allGeneSets <- topTable(fit, number=Inf)
+DEgeneSets <- topTable(fit, number=Inf, p.value=adjPvalueCutoff, adjust="BH")
+res <- decideTests(fit, p.value=adjPvalueCutoff)
+summary(res)
+
+pathways_ad_vs_fav_vs_inter <- as.data.frame(res)
+pathways_ad_vs_fav_vs_inter[(pathways_ad_vs_fav_vs_inter$Adverse>0 & pathways_ad_vs_fav_vs_inter$Favorable<0),]
+pathways_ad_vs_fav_vs_inter[(pathways_ad_vs_fav_vs_inter$Adverse>0 & pathways_ad_vs_fav_vs_inter$Intermediate<0),]
+
+pathways_ad_vs_fav_vs_inter[(pathways_ad_vs_fav_vs_inter$Adverse<0 & pathways_ad_vs_fav_vs_inter$Favorable>0),]
+pathways_ad_vs_fav_vs_inter[(pathways_ad_vs_fav_vs_inter$Adverse>0),]
+pathways_ad_vs_fav_vs_inter[(pathways_ad_vs_fav_vs_inter$Favorable<0),]
+```
+
+### Survival not interesting
+```{r}
+meta_MAexp <- as.data.frame(MAexp@colData)[c('status')]
+meta_MAexp$status
+
+design <- model.matrix(~ factor(meta_MAexp[colnames(RNAseq_vsd_gsva_df),]) + 0)
+colnames(design) <- c("0","1")
+
+fit <- lmFit(RNAseq_vsd_gsva_df, design)
+fit <- eBayes(fit)
+
+allGeneSets <- topTable(fit, number=Inf)
+DEgeneSets <- topTable(fit, number=Inf, p.value=adjPvalueCutoff, adjust="BH")
+res <- decideTests(fit, p.value=adjPvalueCutoff)
+summary(res)
+
+pathways_survival <- as.data.frame(res)
+pathways_survival[pathways_survival$`0`>0,]
+```
+
+```{r}
+as.data.frame(MAexp@colData)[c('who_perfstatus')]
+```
+### Drug-Gene interactions
+```{r}
+
+assay(MAexp@ExperimentList$DSRT)
+
+MAexp@ExperimentList
+FO5A_druglist <- read.csv("fimm_drugname.csv",header = TRUE)
+FO5A_druglist$DRUG_NAME <- toupper(FO5A_druglist$DRUG_NAME)
+drug_gene <- read.csv("drug_gene_interactions.csv",header = TRUE, sep=',')
+drug_gene <- unique(drug_gene[!(is.na(drug_gene$drug_name) | drug_gene$drug_name=="" | drug_gene$gene_name==""),])
+drug_gene[drug_gene$drug_name=="VENETOCLAX",]
+freq_drugname  <- as.data.frame(table(drug_gene$drug_name))
+list_drugs_genesets <- c(freq_drugname[freq_drugname$Freq>4,]['Var1'])$Var1
+drug_genename <- drug_gene %>%
+  group_by(drug_name)%>%
+  summarise(gene_name = paste(gene_name, collapse = ","))
+drug_entrezid <- drug_gene %>%
+  group_by(drug_name)%>%
+  summarise(entrez_id = paste(entrez_id, collapse = '&'))
+drug_entrezid$source <-paste0("https://www.dgidb.org/downloads:2020Nov:",drug_entrezid$drug_name) 
+drug_entrezid <- drug_entrezid[c('drug_name','source','entrez_id')]
+drug_entrezid <- drug_entrezid[drug_entrezid$drug_name %in%  list_drugs_genesets,] 
+drug_entrezid <- drug_entrezid[drug_entrezid$drug_name %in% FO5A_druglist$DRUG_NAME,]
+drug_entrezid$entrez_id
+
+write.csv(drug_entrezid,file="drug_gene_entrezid_interactions_nov2020.gmt",row.names = FALSE,sep = " ")
+```
+### Create drug-gene gmt file
+```{r}
+drug_gene_nov2020 <- getGmt("drug_gene_entrezid_interactions_nov2020_curated.gmt", geneIdType=EntrezIdentifier(), sep="\t")
+```
+### 
+
+BIOCARTA_FEEDER_PATHWAY http://www.gsea-msigdb.org/gsea/msigdb/cards/BIOCARTA_FEEDER_PATHWAY    4351    3098    3795    5236    11181   3938    7167    5837    5836
+BIOCARTA_PROTEASOME_PATHWAY     http://www.gsea-msigdb.org/gsea/msigdb/cards/BIOCARTA_PROTEASOME_PATHWAY        6184    5682    5686    6185    5685    5684    5683    5691    7317    5690    5693    5692    5695    5694    7319    7337    5687    5688    5689
+
+ABEMACICLIB     https://www.dgidb.org/downloads:2020Nov:ABEMACICLIB     1029    3845    1019    896    2099    1021    7157    6597    2064    5241    4893    2100    595    894
+ABEXINOSTAT     https://www.dgidb.org/downloads:2020Nov:ABEXINOSTAT     9734    51564    55869    9759    3066    83933    3065    8841    3064    10013    10014
+ABIRATERONE     https://www.dgidb.org/downloads:2020Nov:ABIRATERONE     1586    29940    5728    7259    367
